@@ -14,6 +14,28 @@ function App() {
 
   const canUseFrontendDirect = useMemo(() => Boolean(elevenKey), [elevenKey]);
 
+  const readErrorPayload = async (res) => {
+    try {
+      const ct = res.headers.get("content-type") || "";
+      if (ct.includes("application/json")) {
+        const data = await res.json();
+        // Common ElevenLabs error shapes: { detail: "..." } or { message: "..." } or array
+        const detail = data?.detail || data?.message || (Array.isArray(data) ? data[0]?.message : "");
+        return detail || JSON.stringify(data);
+      }
+      const text = await res.text();
+      return text || `HTTP ${res.status}`;
+    } catch {
+      return `HTTP ${res.status}`;
+    }
+  };
+
+  const safeObjectUrl = (blob) => {
+    // Revoke previous URL to avoid leaks
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+    return URL.createObjectURL(blob);
+  };
+
   const generate = async ({ voiceName, text, stability, similarityBoost, file }) => {
     setError("");
     setLoading(true);
@@ -33,20 +55,24 @@ function App() {
           method: "POST",
           body: form,
         });
-        if (!res.ok) throw new Error(`Backend error ${res.status}`);
+        if (!res.ok) {
+          const payload = await readErrorPayload(res);
+          throw new Error(`Backend ${res.status}: ${payload}`);
+        }
         // Expect binary audio
         const blob = await res.blob();
-        const url = URL.createObjectURL(blob);
+        const url = safeObjectUrl(blob);
         setAudioUrl(url);
         return;
       }
 
       if (!canUseFrontendDirect) {
-        throw new Error("No backend configured and no API key on frontend.");
+        throw new Error(
+          "No backend configured and no ElevenLabs API key found. Add VITE_BACKEND_URL or VITE_ELEVENLABS_API_KEY."
+        );
       }
 
       // Fallback demo: call ElevenLabs directly from frontend (not for production)
-      // This path requires VITE_ELEVENLABS_API_KEY to be set and allows quick testing.
       const uploadRes = await fetch("https://api.elevenlabs.io/v1/voices/add", {
         method: "POST",
         headers: {
@@ -60,10 +86,13 @@ function App() {
           return form;
         })(),
       });
-      if (!uploadRes.ok) throw new Error("Voice upload failed");
+      if (!uploadRes.ok) {
+        const payload = await readErrorPayload(uploadRes);
+        throw new Error(`Upload failed ${uploadRes.status}: ${payload}`);
+      }
       const uploaded = await uploadRes.json();
       const voiceId = uploaded?.voice_id || uploaded?.voice?.voice_id;
-      if (!voiceId) throw new Error("No voice id returned");
+      if (!voiceId) throw new Error("No voice id returned from ElevenLabs.");
 
       const genRes = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
         method: "POST",
@@ -77,11 +106,19 @@ function App() {
           voice_settings: { stability, similarity_boost: similarityBoost },
         }),
       });
-      if (!genRes.ok) throw new Error("Generation failed");
+      if (!genRes.ok) {
+        const payload = await readErrorPayload(genRes);
+        throw new Error(`Synthesis failed ${genRes.status}: ${payload}`);
+      }
       const blob = await genRes.blob();
-      setAudioUrl(URL.createObjectURL(blob));
+      setAudioUrl(safeObjectUrl(blob));
     } catch (e) {
-      setError(e.message || "Something went wrong");
+      const msg = (e && e.message) ? e.message : "Something went wrong";
+      // Provide lightweight guidance for common issues
+      const hint = !backend && !canUseFrontendDirect
+        ? "Tip: Set VITE_BACKEND_URL for a secure proxy, or VITE_ELEVENLABS_API_KEY for quick testing."
+        : "";
+      setError([msg, hint].filter(Boolean).join("\n"));
     } finally {
       setLoading(false);
     }
@@ -102,7 +139,7 @@ function App() {
             <VoiceForm onSubmit={generate} loading={loading} />
 
             {error && (
-              <div className="mt-6 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-red-200 text-sm">
+              <div className="mt-6 rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-red-200 text-sm whitespace-pre-wrap">
                 {error}
               </div>
             )}
